@@ -6,6 +6,7 @@
 *
 * Behavior:
 * Prints start time and ETA once, then shows a clean progress bar.
+* No ANSI colors for maximum compatibility with all terminals/logs.
 */
 
 #include <stdio.h>
@@ -13,13 +14,6 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
-
-/* ANSI Color Codes */
-#define ANSI_COLOR_GREEN   "\x1b[32m"
-#define ANSI_COLOR_CYAN    "\x1b[36m"
-#define ANSI_COLOR_YELLOW  "\x1b[33m"
-#define ANSI_COLOR_RESET   "\x1b[0m"
-#define ANSI_BOLD          "\x1b[1m"
 
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
@@ -33,11 +27,6 @@
         return FALSE;
     }
     static void install_handler(void) {
-        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        DWORD dwMode = 0;
-        if (GetConsoleMode(hOut, &dwMode)) {
-            SetConsoleMode(hOut, dwMode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-        }
         SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     }
     static int was_interrupted(void) {
@@ -76,18 +65,18 @@
     }
 #endif
 
-/* Renders the progress bar and percentage */
+/* Renders the progress bar and percentage in plain text */
 static void print_bar(long elapsed, long total) {
     const int BAR_WIDTH = 20;
     float percentage = (total == 0) ? 1.0f : (float)elapsed / total;
     int filled_width = (int)(percentage * BAR_WIDTH);
 
-    printf(" [" ANSI_COLOR_GREEN);
+    printf(" [");
     for (int i = 0; i < BAR_WIDTH; ++i) {
-        if (i < filled_width) printf("#");
-        else printf(ANSI_COLOR_RESET "-");
+        if (i < filled_width) putchar('#');
+        else putchar('-');
     }
-    printf(ANSI_COLOR_RESET "] %3d%%", (int)(percentage * 100));
+    printf("] %3d%%", (int)(percentage * 100));
 }
 
 int main(int argc, char *argv[]) {
@@ -123,16 +112,15 @@ int main(int argc, char *argv[]) {
 
     install_handler();
 
-    /* Calculate and display the Header */
+    /* Calculate Start and ETA times */
     time_t now = time(NULL);
     time_t finish = now + total;
-    
+
     char start_str[10], eta_str[10];
     strftime(start_str, sizeof(start_str), "%H:%M:%S", localtime(&now));
     strftime(eta_str, sizeof(eta_str), "%H:%M:%S", localtime(&finish));
 
-    printf("Start Time: " ANSI_COLOR_CYAN "%s" ANSI_COLOR_RESET " | ETA: " ANSI_COLOR_YELLOW "%s" ANSI_COLOR_RESET "\n", 
-            start_str, eta_str);
+    printf("Start Time: %s | ETA: %s\n", start_str, eta_str);
     printf("Sleeping for %ld second%s...\n", total, (total == 1 ? "" : "s"));
 
     long elapsed = 0;
@@ -143,16 +131,17 @@ int main(int argc, char *argv[]) {
                 print_bar(elapsed, total);
                 printf("\n");
             } else {
-                /* Removed ETA from this line to keep it clean */
+                /* \r returns cursor to start of line */
                 printf("\rElapsed: %4ld s | Remaining: %4ld s", elapsed, total - elapsed);
                 print_bar(elapsed, total);
-                printf("    "); // Padding for clean terminal display
+                printf("    ");
                 fflush(stdout);
             }
         }
 
         if (elapsed == total) break;
 
+        /* Check for interrupt before and during sleep */
         if (was_interrupted() || sleep_one_second() != 0 || was_interrupted()) {
             if (!quiet && !multiline) putchar('\n');
             fprintf(stderr, "Interrupted at %ld/%ld seconds.\n", elapsed, total);
@@ -162,6 +151,6 @@ int main(int argc, char *argv[]) {
     }
 
     if (!quiet && !multiline) putchar('\n');
-    printf(ANSI_BOLD ANSI_COLOR_GREEN "Done." ANSI_COLOR_RESET " Total time: %lds.\n", total);
+    printf("Done. Total time: %lds.\n", total);
     return 0;
 }
