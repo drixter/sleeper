@@ -1,23 +1,25 @@
-
 /*
 * sleep_progress.c
 *
 * Usage:
-*   ./sleep_progress <seconds> [--multiline]
-*
-* Example:
-*   ./sleep_progress 10
-*   ./sleep_progress 10 --multiline
+* ./sleep_progress <seconds> [--multiline] [--quiet]
 *
 * Behavior:
-*   Prints how many seconds have elapsed and how many are left.
-*   Updates once per second. By default, it updates on a single line.
+* Prints start time and ETA once, then shows a clean progress bar.
 */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
+
+/* ANSI Color Codes */
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+#define ANSI_BOLD          "\x1b[1m"
 
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
@@ -31,9 +33,12 @@
         return FALSE;
     }
     static void install_handler(void) {
-        if (!SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE)) {
-            fprintf(stderr, "Failed to set console control handler\n");
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            SetConsoleMode(hOut, dwMode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
         }
+        SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     }
     static int was_interrupted(void) {
         return (InterlockedCompareExchange(&interrupted, 1, 1) == 1);
@@ -44,7 +49,6 @@
     }
 #else
     #include <signal.h>
-    #include <time.h>
     #include <unistd.h>
 
     static volatile sig_atomic_t interrupted = 0;
@@ -58,9 +62,7 @@
         sa.sa_handler = handle_sigint;
         sa.sa_flags = SA_RESTART;
         sigemptyset(&sa.sa_mask);
-        if (sigaction(SIGINT, &sa, NULL) == -1) {
-            perror("sigaction");
-        }
+        sigaction(SIGINT, &sa, NULL);
     }
     static int was_interrupted(void) {
         return interrupted;
@@ -74,65 +76,92 @@
     }
 #endif
 
-static void print_usage(const char *argv0) {
-    fprintf(stderr, "Usage: %s <seconds> [--multiline]\n", argv0);
+/* Renders the progress bar and percentage */
+static void print_bar(long elapsed, long total) {
+    const int BAR_WIDTH = 20;
+    float percentage = (total == 0) ? 1.0f : (float)elapsed / total;
+    int filled_width = (int)(percentage * BAR_WIDTH);
+
+    printf(" [" ANSI_COLOR_GREEN);
+    for (int i = 0; i < BAR_WIDTH; ++i) {
+        if (i < filled_width) printf("#");
+        else printf(ANSI_COLOR_RESET "-");
+    }
+    printf(ANSI_COLOR_RESET "] %3d%%", (int)(percentage * 100));
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2 || argc > 3) {
-        print_usage(argv[0]);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <seconds> [--multiline] [--quiet]\n", argv[0]);
         return 1;
     }
 
     int multiline = 0;
-    if (argc == 3 && strcmp(argv[2], "--multiline") == 0) {
-        multiline = 1;
+    int quiet = 0;
+    long total = -1;
+
+    /* Parse arguments */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--multiline") == 0) {
+            multiline = 1;
+        } else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
+            quiet = 1;
+        } else if (total == -1) {
+            char *end = NULL;
+            total = strtol(argv[i], &end, 10);
+            if (errno != 0 || end == argv[i] || *end != '\0' || total < 0) {
+                fprintf(stderr, "Error: <seconds> must be a non-negative integer.\n");
+                return 1;
+            }
+        }
     }
 
-    char *end = NULL;
-    errno = 0;
-    long total = strtol(argv[1], &end, 10);
-    if (errno != 0 || end == argv[1] || *end != '\0' || total < 0) {
-        fprintf(stderr, "Error: <seconds> must be a non-negative integer.\n");
+    if (total == -1) {
+        fprintf(stderr, "Error: Missing <seconds> argument.\n");
         return 1;
     }
 
     install_handler();
 
+    /* Calculate and display the Header */
+    time_t now = time(NULL);
+    time_t finish = now + total;
+    
+    char start_str[10], eta_str[10];
+    strftime(start_str, sizeof(start_str), "%H:%M:%S", localtime(&now));
+    strftime(eta_str, sizeof(eta_str), "%H:%M:%S", localtime(&finish));
+
+    printf("Start Time: " ANSI_COLOR_CYAN "%s" ANSI_COLOR_RESET " | ETA: " ANSI_COLOR_YELLOW "%s" ANSI_COLOR_RESET "\n", 
+            start_str, eta_str);
+    printf("Sleeping for %ld second%s...\n", total, (total == 1 ? "" : "s"));
+
     long elapsed = 0;
+    while (elapsed <= total) {
+        if (!quiet) {
+            if (multiline) {
+                printf("Elapsed: %4ld s | Remaining: %4ld s", elapsed, total - elapsed);
+                print_bar(elapsed, total);
+                printf("\n");
+            } else {
+                /* Removed ETA from this line to keep it clean */
+                printf("\rElapsed: %4ld s | Remaining: %4ld s", elapsed, total - elapsed);
+                print_bar(elapsed, total);
+                printf("    "); // Padding for clean terminal display
+                fflush(stdout);
+            }
+        }
 
-    if (multiline) {
-        printf("Sleeping for %ld second%s...\n", total, (total == 1 ? "" : "s"));
-    } else {
-        printf("Sleeping for %ld second%s... ", total, (total == 1 ? "" : "s"));
-    }
-    fflush(stdout);
+        if (elapsed == total) break;
 
-    while (elapsed < total) {
-        if (was_interrupted()) {
-            if (!multiline) putchar('\n');
+        if (was_interrupted() || sleep_one_second() != 0 || was_interrupted()) {
+            if (!quiet && !multiline) putchar('\n');
             fprintf(stderr, "Interrupted at %ld/%ld seconds.\n", elapsed, total);
             return 130;
         }
-
-        if (sleep_one_second() != 0) {
-            if (!multiline) putchar('\n');
-            fprintf(stderr, "Interrupted at %ld/%ld seconds.\n", elapsed, total);
-            return 130;
-        }
-
         elapsed++;
-        long remaining = total - elapsed;
-
-        if (multiline) {
-            printf("Elapsed: %ld s | Remaining: %ld s\n", elapsed, remaining);
-        } else {
-            printf("\rElapsed: %ld s | Remaining: %ld s", elapsed, remaining);
-        }
-        fflush(stdout);
     }
 
-    if (!multiline) putchar('\n');
-    printf("Done. Slept for %ld second%s.\n", total, (total == 1 ? "" : "s"));
+    if (!quiet && !multiline) putchar('\n');
+    printf(ANSI_BOLD ANSI_COLOR_GREEN "Done." ANSI_COLOR_RESET " Total time: %lds.\n", total);
     return 0;
 }
